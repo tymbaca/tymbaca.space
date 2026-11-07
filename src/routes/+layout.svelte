@@ -11,8 +11,6 @@
 
 <svelte:head>
 	<link rel="icon" href={favicon} type="image/svg+xml" />
-	<meta name="theme-color" content="#f4f0e8" />
-	<meta name="color-scheme" content="light" />
 	<meta property="og:site_name" content={site.name} />
 </svelte:head>
 

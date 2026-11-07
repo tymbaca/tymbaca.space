@@ -296,7 +296,7 @@ function buildProcessor(context: IncludeContext, headings: Heading[]) {
 		.use(rehypeExternalLinks)
 		.use(rehypeImageAttributes)
 		.use(rehypeShiki, {
-			theme: 'rose-pine-dawn',
+			theme: 'vitesse-dark',
 			langs: SHIKI_LANGUAGES,
 			defaultLanguage: 'text',
 			lazy: true,

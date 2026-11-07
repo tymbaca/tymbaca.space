@@ -3,5 +3,5 @@ export const site = {
 	title: 'tymbaca.space',
 	description: 'A running collection of things I build, break, and figure out.',
 	author: 'tymbaca',
-	nav: [{ href: '/articles', label: 'Articles' }]
+	nav: [{ href: '/articles', label: 'articles' }]
 } as const;

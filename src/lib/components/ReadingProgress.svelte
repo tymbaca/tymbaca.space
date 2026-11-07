@@ -38,14 +38,14 @@
 		position: fixed;
 		inset: 0 0 auto;
 		z-index: 60;
-		height: 2px;
+		height: 1px;
 		pointer-events: none;
 	}
 
 	span {
 		display: block;
-		height: 100%;
 		width: 100%;
+		height: 100%;
 		background: var(--accent);
 		transform-origin: left;
 		transition: transform 80ms linear;

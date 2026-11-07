@@ -11,7 +11,7 @@
 
 		const update = () => {
 			frame = 0;
-			const offset = 150;
+			const offset = 130;
 			let current = headings[0]?.id ?? '';
 
 			for (const heading of headings) {
@@ -42,7 +42,7 @@
 </script>
 
 <aside class="toc" aria-label="Table of contents">
-	<p class="toc-title">On this page</p>
+	<p class="toc-title">on this page</p>
 	<ol>
 		{#each headings as heading}
 			<li class:sub={heading.level === 3} class:active={activeId === heading.id}>
@@ -55,78 +55,51 @@
 <style>
 	.toc {
 		position: sticky;
-		top: 6.5rem;
-		max-height: calc(100vh - 8.5rem);
+		top: 5rem;
+		max-height: calc(100vh - 7rem);
 		overflow-y: auto;
-		padding: 0.25rem 0 1rem 1.4rem;
-		border-left: 1px solid var(--rule);
+		padding-left: 1rem;
+		border-left: 1px solid var(--line);
 		scrollbar-width: thin;
-		scrollbar-color: var(--rule-strong) transparent;
+		scrollbar-color: var(--line-strong) transparent;
 	}
 
 	.toc-title {
-		margin: 0 0 1rem;
-		font-family: var(--font-mono);
-		font-size: 0.62rem;
-		font-weight: 500;
-		letter-spacing: 0.12em;
-		text-transform: uppercase;
+		margin: 0 0 0.9rem;
 		color: var(--muted);
+		font-size: 0.62rem;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
 	}
 
 	ol {
 		display: flex;
 		flex-direction: column;
-		gap: 0.15rem;
+		gap: 0.05rem;
 		margin: 0;
 		padding: 0;
 		list-style: none;
 	}
 
-	li {
-		position: relative;
-		line-height: 1.35;
-	}
-
-	li::before {
-		content: '';
-		position: absolute;
-		left: -1.46rem;
-		top: 0.58em;
-		width: 2px;
-		height: 0;
-		background: var(--accent);
-		transition: height 180ms var(--ease-out);
-	}
-
-	li.active::before {
-		height: 1.1em;
-	}
-
 	a {
 		display: block;
-		padding: 0.3rem 0;
-		font-size: 0.76rem;
-		line-height: 1.4;
+		padding: 0.22rem 0;
 		color: var(--muted);
-		text-decoration: none;
-		transition:
-			color 160ms ease,
-			transform 160ms var(--ease-out);
+		font-size: 0.72rem;
+		line-height: 1.5;
+		transition: color 140ms ease;
 	}
 
 	li.sub a {
-		padding-left: 0.8rem;
-		font-size: 0.72rem;
+		padding-left: 0.7rem;
+		font-size: 0.68rem;
 	}
 
 	a:hover {
-		color: var(--ink);
-		transform: translateX(2px);
+		color: var(--text);
 	}
 
 	li.active a {
-		color: var(--ink);
-		font-weight: 500;
+		color: var(--accent);
 	}
 </style>

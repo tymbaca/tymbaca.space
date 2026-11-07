@@ -11,54 +11,48 @@
 </svelte:head>
 
 <section class="error-page shell">
-	<p class="eyebrow">Error {status}</p>
-	<h1>{status === 404 ? 'Lost in the margins.' : 'A page went sideways.'}</h1>
+	<p class="eyebrow">error / {status}</p>
+	<h1>{status === 404 ? 'Not found.' : 'Something went wrong.'}</h1>
 	<p class="message">{message}</p>
-	<a class="back" href="/articles"><span aria-hidden="true">←</span> Back to all articles</a>
+	<a class="back" href="/articles"><span aria-hidden="true">←</span> index</a>
 </section>
 
 <style>
 	.error-page {
-		padding-block: clamp(5rem, 14vw, 11rem);
+		padding-block: clamp(5rem, 12vw, 9rem);
 	}
 
 	.eyebrow {
 		margin: 0 0 1.5rem;
-		font-family: var(--font-mono);
-		font-size: 0.65rem;
-		letter-spacing: 0.13em;
+		color: var(--muted);
+		font-size: 0.62rem;
+		letter-spacing: 0.1em;
 		text-transform: uppercase;
-		color: var(--accent-ink);
 	}
 
 	h1 {
-		max-width: 16ch;
 		margin: 0;
-		font-family: var(--font-display);
-		font-size: clamp(3rem, 8vw, 6.5rem);
-		font-weight: 400;
-		line-height: 0.92;
-		letter-spacing: -0.03em;
+		font-size: clamp(1.8rem, 4vw, 2.6rem);
+		font-weight: 500;
+		line-height: 1.2;
+		letter-spacing: -0.04em;
 	}
 
 	.message {
 		max-width: 48ch;
-		margin: 1.5rem 0 2.5rem;
-		color: var(--ink-soft);
+		margin: 1rem 0 2.25rem;
+		color: var(--text-soft);
+		font-size: 0.84rem;
 	}
 
 	.back {
-		display: inline-flex;
-		align-items: center;
-		gap: 0.45rem;
-		font-family: var(--font-mono);
+		display: inline-block;
+		padding-bottom: 0.15rem;
+		border-bottom: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+		color: var(--accent);
 		font-size: 0.68rem;
-		letter-spacing: 0.07em;
+		letter-spacing: 0.06em;
 		text-transform: uppercase;
-		text-decoration: none;
-		color: var(--accent-ink);
-		border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
-		padding-bottom: 0.2rem;
 	}
 
 	.back:hover {
