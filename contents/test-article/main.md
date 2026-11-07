@@ -2,11 +2,11 @@ This is my test article.
 
 This is include:
 
-![](67166bc4576a2074ad2fc0cf581bd6cb.jpg)
+![](include/67166bc4576a2074ad2fc0cf581bd6cb.jpg)
 
 And this is counter:
 
-![](Counter.svelte)
+![](include/Counter.svelte)
 
 # Markdown: Syntax
 
