@@ -6,29 +6,23 @@
 	const FOLLOW_MS = 800;
 	const HOLD_MS = 400;
 	const MAX_NODES = 5;
+	const ERRS_TO_FALLBACK = 3;
 
 	let now = $state(0);
 	let running = $state(true);
 	let speed = $state(1);
 	let nodes = $state(makeRoster());
-	let storage = $state({ exists: false, value: '', deadline: 0, expiredLogged: false });
-	let events = $state([
-		{
-			id: 1,
-			at: 0,
-			actor: 'system',
-			action: 'init',
-			detail: `key "${KEY}" is free — three candidates start following`,
-			tone: 'info'
-		}
-	]);
-	let stats = $state({ setnx: 0, renew: 0, get: 0, conflicts: 0 });
-	let eventId = 2;
+	let storage = $state(emptyStorage());
+	let status = $state('cut a link to test the lease');
+	let statusTone = $state('muted');
+	let pulseSeq = 0;
 	let nextNodeNumber = 4;
 
 	let remaining = $derived(Math.max(0, storage.deadline - now));
 	let leasePercent = $derived(
-		storage.exists ? Math.max(0, Math.min(100, (remaining / TTL_MS) * 100)) : 0
+		storage.exists && storage.deadline > now
+			? Math.max(0, Math.min(100, (remaining / TTL_MS) * 100))
+			: 0
 	);
 	let holder = $derived(
 		storage.exists && storage.value && storage.deadline > now ? storage.value : ''
@@ -40,7 +34,10 @@
 				? 'held'
 				: 'expired'
 	);
-	let currentLeader = $derived(nodes.find((node) => node.leader)?.id ?? 'none');
+
+	function emptyStorage() {
+		return { exists: false, value: '', deadline: 0, expiredLogged: false };
+	}
 
 	function makeNode(number, offset) {
 		return {
@@ -49,9 +46,9 @@
 			leader: false,
 			phase: 'following',
 			nextAt: offset,
-			lastAction: 'waiting for first attempt',
-			lastTone: 'muted',
-			holds: 0
+			connected: true,
+			errors: 0,
+			outPulse: 0
 		};
 	}
 
@@ -63,35 +60,29 @@
 		return `${(Math.max(0, ms) / 1000).toFixed(1)}s`;
 	}
 
-	function clock(ms) {
-		return `+${(Math.max(0, ms) / 1000).toFixed(2)}s`;
+	function setStatus(text, tone = 'muted') {
+		status = text;
+		statusTone = tone;
 	}
 
-	function pushEvent(tone, actor, action, detail) {
-		events.unshift({ id: eventId++, at: now, actor, action, detail, tone });
-		if (events.length > 32) events.pop();
+	function pulse(node) {
+		node.outPulse = ++pulseSeq;
 	}
 
 	/**
-	 * SetNX semantics from the library's storage adapters: write only when
-	 * the record does not exist or its deadline has already passed.
+	 * SetNX only writes when the record is missing or its lease has expired.
+	 * A disconnected node still follows; its storage calls simply fail.
 	 */
 	function trySetNx(node) {
-		const free = !storage.exists || storage.deadline <= now;
-
-		stats.setnx += 1;
-
-		if (!free) {
-			stats.conflicts += 1;
-			node.lastAction = `SETNX → busy, held by ${storage.value}`;
-			node.lastTone = 'miss';
+		if (!node.connected) {
 			node.nextAt = now + FOLLOW_MS;
-			pushEvent(
-				'miss',
-				node.id,
-				'SETNX',
-				`denied · ${storage.value} owns the key (${fmt(storage.deadline - now)} left)`
-			);
+			return;
+		}
+
+		pulse(node);
+
+		if (storage.exists && storage.deadline > now) {
+			node.nextAt = now + FOLLOW_MS;
 			return;
 		}
 
@@ -102,117 +93,127 @@
 
 		node.leader = true;
 		node.phase = 'holding';
-		node.holds = 0;
-		node.lastAction = `SETNX → acquired, ttl ${fmt(TTL_MS)}`;
-		node.lastTone = 'ok';
+		node.errors = 0;
 		node.nextAt = now + HOLD_MS;
 
-		pushEvent('ok', node.id, 'SETNX', `acquired key "${KEY}" · ttl ${fmt(TTL_MS)}`);
+		setStatus(`${node.id} holds the lease`, 'ok');
 	}
 
 	/**
-	 * While holding, the candidate pushes the deadline forward with Renew and
-	 * then reads the value back. If it is no longer its own id, leadership is
-	 * gone and the record is expired with Renew(now).
+	 * Renew extends the deadline, Get verifies ownership. A disconnected
+	 * leader keeps its title for ERRS_TO_FALLBACK failed renewals.
 	 */
 	function hold(node) {
-		stats.renew += 1;
-		stats.get += 1;
+		if (!node.connected) {
+			node.errors += 1;
+			node.nextAt = now + HOLD_MS;
+
+			if (node.errors >= ERRS_TO_FALLBACK) {
+				node.errors = 0;
+				node.leader = false;
+				node.phase = 'following';
+				node.nextAt = now + FOLLOW_MS;
+				setStatus(`${node.id} lost leadership`, 'bad');
+			}
+			return;
+		}
 
 		if (storage.exists) {
 			storage.deadline = now + TTL_MS;
 			storage.expiredLogged = false;
 		}
 
+		pulse(node);
+
 		const current = storage.exists && storage.deadline > now ? storage.value : '';
 
 		if (current !== node.id) {
 			node.leader = false;
 			node.phase = 'following';
+			node.errors = 0;
 			node.nextAt = now + FOLLOW_MS;
-			node.lastAction = `LOST → owner is ${current || 'nobody'}`;
-			node.lastTone = 'bad';
 
 			if (storage.exists && storage.value === node.id) {
 				storage.deadline = now;
 				storage.expiredLogged = true;
 			}
 
-			pushEvent('bad', node.id, 'LOST', `GET returned ${current || 'an empty value'}`);
+			setStatus(`${node.id} lost leadership`, 'bad');
 			return;
 		}
 
-		node.holds += 1;
-		node.lastAction = `RENEW +${fmt(TTL_MS)} · GET ✓`;
-		node.lastTone = 'renew';
+		node.errors = 0;
 		node.nextAt = now + HOLD_MS;
-
-		pushEvent('renew', node.id, 'RENEW', `deadline +${fmt(TTL_MS)} · GET matches`);
 	}
 
 	function tick() {
 		if (storage.exists && storage.value && storage.deadline <= now && !storage.expiredLogged) {
 			storage.expiredLogged = true;
-			pushEvent(
-				'warn',
-				storage.value,
-				'EXPIRE',
-				`deadline passed — key "${KEY}" is free to claim`
-			);
+			setStatus('lease expired', 'warn');
 		}
 
 		for (const node of nodes) {
 			if (!node.alive) continue;
 
 			let guard = 0;
-			while (now >= node.nextAt && guard++ < 3) {
-				if (node.phase === 'holding') {
-					hold(node);
-				} else {
-					trySetNx(node);
-				}
+			while (now >= node.nextAt && guard++ < 4) {
+				if (node.phase === 'holding') hold(node);
+				else trySetNx(node);
 			}
 		}
 	}
 
-	function toggleNode(node) {
+	function toggleLink(node) {
+		if (!node.alive) return;
+
+		node.connected = !node.connected;
+		node.errors = 0;
+
+		if (node.connected) {
+			// If the node stepped down after exhausting retries but its own
+			// lease never expired, it is still the unique owner. Resume it
+			// instead of leaving the key stale until the deadline.
+			if (storage.exists && storage.value === node.id && storage.deadline > now) {
+				node.leader = true;
+				node.phase = 'holding';
+				node.errors = 0;
+				node.nextAt = now + HOLD_MS;
+				setStatus(`${node.id} resumed the lease`, 'ok');
+				return;
+			}
+
+			node.nextAt = now + 180 + Math.random() * 260;
+			setStatus(`${node.id} reconnected`, 'ok');
+		} else {
+			node.nextAt = now + (node.phase === 'holding' ? HOLD_MS : FOLLOW_MS);
+			setStatus(`${node.id} lost storage access`, 'warn');
+		}
+	}
+
+	function toggleAlive(node) {
 		if (node.alive) {
-			const wasLeader = node.leader;
 			node.alive = false;
 			node.leader = false;
 			node.phase = 'offline';
-			node.lastAction = wasLeader
-				? `STOPPED → lease dies in ${fmt(storage.deadline - now)}`
-				: 'STOPPED → left the election';
-			node.lastTone = 'warn';
-
-			pushEvent(
-				'warn',
-				node.id,
-				wasLeader ? 'STOP' : 'STOP',
-				wasLeader
-					? `leader is down · no more renewals, lease expires in ${fmt(storage.deadline - now)}`
-					: 'candidate is down'
-			);
+			node.errors = 0;
+			setStatus(`${node.id} stopped`, 'warn');
 			return;
 		}
 
 		node.alive = true;
 		node.leader = false;
 		node.phase = 'following';
-		node.nextAt = now + 160 + Math.random() * 280;
-		node.lastAction = 'START → following again';
-		node.lastTone = 'info';
-
-		pushEvent('info', node.id, 'START', 'candidate joined the election');
+		node.errors = 0;
+		node.nextAt = now + 220 + Math.random() * 280;
+		setStatus(`${node.id} started`, 'ok');
 	}
 
 	function addNode() {
 		if (nodes.length >= MAX_NODES) return;
 
-		const node = makeNode(nextNodeNumber++, now + 150 + Math.random() * 300);
+		const node = makeNode(nextNodeNumber++, now + 180 + Math.random() * 260);
 		nodes.push(node);
-		pushEvent('info', node.id, 'JOIN', 'new candidate starts following');
+		setStatus(`${node.id} joined`, 'muted');
 	}
 
 	function toggleRunning() {
@@ -222,21 +223,10 @@
 	function reset() {
 		now = 0;
 		nodes = makeRoster();
-		storage = { exists: false, value: '', deadline: 0, expiredLogged: false };
-		stats = { setnx: 0, renew: 0, get: 0, conflicts: 0 };
+		storage = emptyStorage();
 		nextNodeNumber = 4;
-		eventId = 2;
-		events = [
-			{
-				id: 1,
-				at: 0,
-				actor: 'system',
-				action: 'init',
-				detail: `key "${KEY}" is free — three candidates start following`,
-				tone: 'info'
-			}
-		];
 		running = true;
+		setStatus('cut a link to test the lease', 'muted');
 	}
 
 	onMount(() => {
@@ -262,218 +252,187 @@
 		<div class="brand">
 			<span class="live-dot" class:paused={!running} aria-hidden="true"></span>
 			<span class="brand-title">leader election</span>
-			<span class="brand-sub">single-key lease</span>
 		</div>
-		<div class="topbar-state">
-			<span class="state-label">leader</span>
-			<span class="state-value" class:none={currentLeader === 'none'}>{currentLeader}</span>
-		</div>
-	</header>
 
-	<div class="controls">
-		<div class="control-group">
-			<button class="btn primary" type="button" onclick={toggleRunning}>
-				{running ? 'pause' : 'resume'}
-			</button>
-			<button class="btn" type="button" onclick={reset}>reset</button>
+		<label class="speed" title="Simulation speed">
+			<input
+				type="range"
+				min="0.1"
+				max="2"
+				step="0.1"
+				bind:value={speed}
+				aria-label="Simulation speed"
+			/>
+			<span class="speed-value">{Number(speed).toFixed(1)}×</span>
+		</label>
+
+		<div class="actions">
 			<button
-				class="btn"
+				class="icon-btn"
+				type="button"
+				onclick={toggleRunning}
+				title={running ? 'Pause' : 'Resume'}
+				aria-label={running ? 'Pause simulation' : 'Resume simulation'}
+			>
+				{#if running}
+					<svg viewBox="0 0 24 24" aria-hidden="true">
+						<path d="M9 5v14M15 5v14"></path>
+					</svg>
+				{:else}
+					<svg viewBox="0 0 24 24" aria-hidden="true">
+						<path d="M8 5l11 7-11 7z"></path>
+					</svg>
+				{/if}
+			</button>
+
+			<button
+				class="icon-btn"
+				type="button"
+				onclick={reset}
+				title="Reset"
+				aria-label="Reset simulation"
+			>
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M20 12a8 8 0 1 1-2.34-5.66"></path>
+					<path d="M20 4v5h-5"></path>
+				</svg>
+			</button>
+
+			<button
+				class="icon-btn"
 				type="button"
 				onclick={addNode}
 				disabled={nodes.length >= MAX_NODES}
-				title={nodes.length >= MAX_NODES ? 'Five nodes is the demo limit' : 'Add a candidate'}
+				title={nodes.length >= MAX_NODES ? 'Five nodes is the limit' : 'Add a node'}
+				aria-label="Add a node"
 			>
-				+ node
+				<svg viewBox="0 0 24 24" aria-hidden="true">
+					<path d="M12 5v14M5 12h14"></path>
+				</svg>
 			</button>
 		</div>
-
-		<div class="control-group">
-			<span class="control-label">speed</span>
-			<div class="segmented" role="group" aria-label="Simulation speed">
-				{#each [0.5, 1, 2] as option}
-					<button
-						class="seg"
-						class:active={speed === option}
-						type="button"
-						aria-pressed={speed === option}
-						onclick={() => (speed = option)}
-					>
-						{option}×
-					</button>
-				{/each}
-			</div>
-		</div>
-
-		<div class="timings" aria-label="Election timings">
-			<span>ttl <b>{fmt(TTL_MS)}</b></span>
-			<span>follow <b>{fmt(FOLLOW_MS)}</b></span>
-			<span>hold <b>{fmt(HOLD_MS)}</b></span>
-		</div>
-	</div>
+	</header>
 
 	<div class="stage">
-		<section class="nodes" aria-label="Candidates">
-			<div class="section-head">
-				<span>candidates</span>
-				<span class="tag">{nodes.length} nodes</span>
-			</div>
-
-			{#each nodes as node (node.id)}
-				<div
-					class="node"
-					class:leader={node.leader}
-					class:offline={!node.alive}
-				>
+		{#each nodes as node, index (node.id)}
+			<div class="node-cell" style={`grid-row: ${index + 1}`}>
+				<div class="node" class:leader={node.leader} class:dead={!node.alive}>
 					<div class="node-top">
+						<span class="role-dot" class:on={node.leader} aria-hidden="true"></span>
 						<span class="node-id">{node.id}</span>
 
-						{#if !node.alive}
-							<span class="badge badge-offline">offline</span>
-						{:else if node.leader}
-							<span class="badge badge-leader">leader</span>
-						{:else}
-							<span class="badge badge-follower">follower</span>
-						{/if}
-
 						<button
-							class="node-toggle"
+							class="power-btn"
 							type="button"
-							onclick={() => toggleNode(node)}
-							aria-label={node.alive ? `Stop ${node.id}` : `Restart ${node.id}`}
+							onclick={() => toggleAlive(node)}
+							title={node.alive ? `Stop ${node.id}` : `Start ${node.id}`}
+							aria-label={node.alive ? `Stop ${node.id}` : `Start ${node.id}`}
 						>
-							{node.alive ? 'stop' : 'start'}
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path d="M12 3v8"></path>
+								<path d="M6.3 6.3a8 8 0 1 0 11.4 0"></path>
+							</svg>
 						</button>
 					</div>
 
-					<div class="node-action" class:ok={node.lastTone === 'ok'} class:renew={node.lastTone === 'renew'} class:miss={node.lastTone === 'miss'} class:bad={node.lastTone === 'bad'} class:warn={node.lastTone === 'warn'}>
-						<span class="arrow" aria-hidden="true">↳</span>
-						<span>{node.lastAction}</span>
-					</div>
+					<div class="node-bottom">
+						{#if node.leader}
+							<span class="leader-tag">leader</span>
+						{/if}
 
-					<div class="node-foot">
-						<span class="steps" aria-hidden="true">
-							<span class:active={node.alive && node.phase === 'following'}>SETNX</span>
-							<span class:active={node.alive && node.phase === 'holding'}>RENEW</span>
-							<span class:active={node.alive && node.phase === 'holding'}>GET</span>
-						</span>
-
-						<span class="next">
-							{#if !node.alive}
-								out
-							{:else if node.phase === 'holding'}
-								renew {fmt(node.nextAt - now)}
-							{:else}
-								retry {fmt(node.nextAt - now)}
-							{/if}
-						</span>
+						{#if node.errors > 0}
+							<span class="pips" aria-hidden="true">
+								{#each [0, 1, 2] as level}
+									<span class="pip" class:on={node.errors > level}></span>
+								{/each}
+							</span>
+						{/if}
 					</div>
 				</div>
-			{/each}
-		</section>
+			</div>
 
-		<section class="storage" aria-label="Shared storage">
-			<div class="section-head">
-				<span>shared storage</span>
-				<span class="status" class:held={leaseState === 'held'} class:expired={leaseState === 'expired'}>
+			<div
+				class="link-cell"
+				class:leader={node.leader}
+				class:cut={!node.connected}
+				class:dead={!node.alive}
+				style={`grid-row: ${index + 1}`}
+			>
+				<span class="wire" aria-hidden="true"></span>
+				<span class="arrowhead" aria-hidden="true"></span>
+
+				{#if node.alive && node.connected && node.outPulse > 0}
+					{#key node.outPulse}
+						<span class="packet" aria-hidden="true"></span>
+					{/key}
+				{/if}
+
+				<button
+					class="link-btn"
+					type="button"
+					onclick={() => toggleLink(node)}
+					disabled={!node.alive}
+					title={!node.alive
+						? 'Node is stopped'
+						: node.connected
+							? `Cut ${node.id} from storage`
+							: `Reconnect ${node.id}`}
+					aria-label={node.connected
+						? `Cut ${node.id} storage access`
+						: `Restore ${node.id} storage access`}
+				>
+					<svg viewBox="0 0 24 24" aria-hidden="true">
+						<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+						<path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+					</svg>
+					{#if !node.connected}
+						<span class="slash" aria-hidden="true"></span>
+					{/if}
+				</button>
+			</div>
+		{/each}
+
+		<section
+			class="storage"
+			class:held={leaseState === 'held'}
+			class:expired={leaseState === 'expired'}
+			style={`grid-row: 1 / span ${nodes.length}`}
+			aria-label="Shared storage"
+		>
+			<div class="storage-top">
+				<span class="storage-title">storage</span>
+				<span class="state-pill" class:held={leaseState === 'held'} class:expired={leaseState === 'expired'}>
 					{leaseState}
 				</span>
 			</div>
 
-			<div class="record">
-				<div class="record-line">
-					<span class="record-label">key</span>
-					<span class="record-value key">"{KEY}"</span>
-				</div>
-				<div class="record-line">
-					<span class="record-label">value</span>
-					<span class="record-value holder" class:empty={!storage.value} class:stale={leaseState === 'expired'}>
-						{storage.value || '—'}
-					</span>
-				</div>
-				<div class="record-line">
-					<span class="record-label">deadline</span>
-					<span class="record-value">
-						{#if leaseState === 'held'}
-							in {fmt(remaining)}
-						{:else if leaseState === 'expired'}
-							{fmt(now - storage.deadline)} ago
-						{:else}
-							—
-						{/if}
-					</span>
-				</div>
+			<span class="key-chip">{KEY}</span>
+
+			<div
+				class="storage-value"
+				class:empty={leaseState === 'free'}
+				class:stale={leaseState === 'expired'}
+			>
+				{leaseState === 'free' ? '—' : storage.value}
 			</div>
 
-			<div class="lease">
-				<div class="lease-head">
-					<span>lease</span>
-					<span class="lease-ms">{Math.round(remaining)}ms</span>
-				</div>
-				<div class="lease-track">
-					<div
-						class="lease-fill"
-						class:low={leasePercent < 28}
-						class:expired={leaseState === 'expired'}
-						style={`width: ${leasePercent}%`}
-					></div>
-				</div>
+			<div class="lease-track">
+				<span
+					class="lease-fill"
+					class:low={leasePercent < 28}
+					style={`width: ${leasePercent}%`}
+				></span>
 			</div>
 
-			<div class="storage-stats">
-				<span><b>{stats.setnx}</b> setnx</span>
-				<span><b>{stats.renew}</b> renew</span>
-				<span><b>{stats.conflicts}</b> denied</span>
+			<div class="lease-time">
+				{leaseState === 'held' ? fmt(remaining) : ''}
 			</div>
-
-			<p class="storage-note">
-				{#if leaseState === 'held'}
-					Only renewals from <b>{storage.value}</b> keep this record alive.
-				{:else if leaseState === 'expired'}
-					The row is still there, but <code>get</code> returns an empty value.
-				{:else}
-					The next successful <code>setnx</code> becomes the leader.
-				{/if}
-			</p>
 		</section>
 	</div>
 
-	<section class="events" aria-label="Election events">
-		<div class="section-head">
-			<span>events</span>
-			<span class="tag">latest first</span>
-		</div>
-
-		<div class="event-list">
-			{#each events as event (event.id)}
-				<div class="event-row">
-					<span class="event-time">{clock(event.at)}</span>
-					<span class="event-actor">{event.actor}</span>
-					<span
-						class="event-action"
-						class:ok={event.tone === 'ok'}
-						class:renew={event.tone === 'renew'}
-						class:miss={event.tone === 'miss'}
-						class:warn={event.tone === 'warn'}
-						class:bad={event.tone === 'bad'}
-					>
-						{event.action}
-					</span>
-					<span class="event-detail">{event.detail}</span>
-				</div>
-			{/each}
-		</div>
-	</section>
-
-	<footer class="demo-foot">
-		<div class="legend">
-			<span><b>SETNX</b> claim the key if it is free or expired</span>
-			<span><b>RENEW</b> push the deadline forward</span>
-			<span><b>GET</b> verify the stored id is still ours</span>
-		</div>
-		<p class="hint">
-			Stop the current leader and watch the lease run out — the next candidate to attempt
-			<code>setnx</code> takes over. No balancing here.
-		</p>
+	<footer class="status-line" class:ok={statusTone === 'ok'} class:warn={statusTone === 'warn'} class:bad={statusTone === 'bad'} aria-live="polite">
+		<span class="status-pip" aria-hidden="true"></span>
+		<span class="status-text">{status}</span>
 	</footer>
 </section>
 
@@ -481,7 +440,6 @@
 	.demo {
 		--warn: #d9a441;
 		--danger: #e06c5f;
-		--ok: var(--accent, #c8f56c);
 
 		margin: 0;
 		border: 1px solid var(--line, #252525);
@@ -500,29 +458,23 @@
 	}
 
 	.topbar,
-	.controls,
-	.section-head,
-	.record-line,
-	.lease-head,
-	.storage-stats,
-	.node-top,
-	.node-foot,
-	.event-row,
 	.brand,
-	.topbar-state,
-	.control-group,
-	.segmented,
-	.timings,
-	.legend,
-	.hint {
+	.actions,
+	.node-top,
+	.node-bottom,
+	.storage-top,
+	.status-line {
 		display: flex;
 		align-items: center;
 	}
 
 	.topbar {
+		display: flex;
+		flex-wrap: wrap;
 		justify-content: space-between;
-		gap: 1rem;
-		padding: 0.62rem 0.85rem;
+		align-items: center;
+		gap: 0.45rem 1rem;
+		padding: 0.55rem 0.75rem 0.55rem 0.85rem;
 		border-bottom: 1px solid var(--line, #252525);
 		background: color-mix(in srgb, var(--bg-elevated, #151515) 55%, transparent);
 	}
@@ -533,26 +485,43 @@
 	}
 
 	.brand-title {
-		font-size: 0.68rem;
+		font-size: 0.66rem;
 		font-weight: 500;
 		letter-spacing: 0.14em;
 		text-transform: uppercase;
 		color: var(--text, #e8e6e0);
 	}
 
-	.brand-sub {
-		padding-left: 0.5rem;
-		border-left: 1px solid var(--line, #252525);
-		font-size: 0.64rem;
+	.speed {
+		display: flex;
+		align-items: center;
+		gap: 0.35rem;
+		margin-left: auto;
+		flex: none;
+	}
+
+	.speed input {
+		width: 64px;
+		height: 14px;
+		margin: 0;
+		accent-color: var(--accent, #c8f56c);
+		cursor: pointer;
+	}
+
+	.speed-value {
+		width: 2.05rem;
 		color: var(--muted, #817d75);
+		font-size: 0.56rem;
+		font-variant-numeric: tabular-nums;
+		text-align: right;
 	}
 
 	.live-dot {
 		width: 6px;
 		height: 6px;
 		border-radius: 50%;
-		background: var(--ok);
-		box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 14%, transparent);
+		background: var(--accent, #c8f56c);
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #c8f56c) 14%, transparent);
 		animation: pulse 1.8s ease-in-out infinite;
 	}
 
@@ -574,405 +543,466 @@
 		}
 	}
 
-	.topbar-state {
-		gap: 0.4rem;
-		font-size: 0.64rem;
-		white-space: nowrap;
+	.actions {
+		gap: 0.15rem;
+		flex: none;
 	}
 
-	.state-label {
-		color: var(--muted, #817d75);
-		text-transform: uppercase;
-		letter-spacing: 0.1em;
-	}
-
-	.state-value {
-		color: var(--ok);
-		font-weight: 500;
-	}
-
-	.state-value.none {
-		color: var(--muted, #817d75);
-		font-weight: 400;
-	}
-
-	.controls {
-		flex-wrap: wrap;
-		gap: 0.55rem 0.9rem;
-		padding: 0.6rem 0.85rem;
-		border-bottom: 1px solid var(--line, #252525);
-		background: color-mix(in srgb, var(--bg-soft, #101010) 65%, transparent);
-	}
-
-	.control-group {
-		gap: 0.35rem;
-	}
-
-	.control-label {
-		margin-right: 0.15rem;
-		font-size: 0.62rem;
-		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		color: var(--muted, #817d75);
-	}
-
-	.btn,
-	.seg,
-	.node-toggle {
-		border: 1px solid var(--line, #252525);
+	.icon-btn {
+		display: grid;
+		place-items: center;
+		width: 26px;
+		height: 26px;
+		padding: 0;
+		border: 1px solid transparent;
 		border-radius: 2px;
-		background: var(--bg-soft, #101010);
-		color: var(--text-soft, #b4b1a9);
-		font: inherit;
-		font-size: 0.68rem;
-		line-height: 1.2;
+		background: transparent;
+		color: var(--muted, #817d75);
 		cursor: pointer;
 		transition:
-			border-color 140ms ease,
 			color 140ms ease,
+			border-color 140ms ease,
 			background 140ms ease;
 	}
 
-	.btn {
-		padding: 0.3rem 0.55rem;
-	}
-
-	.btn:hover:not(:disabled),
-	.seg:hover,
-	.node-toggle:hover {
-		border-color: var(--line-strong, #3b3b3b);
+	.icon-btn:hover:not(:disabled) {
+		border-color: var(--line, #252525);
+		background: var(--bg-soft, #101010);
 		color: var(--accent, #c8f56c);
 	}
 
-	.btn.primary {
-		border-color: color-mix(in srgb, var(--accent, #c8f56c) 45%, var(--line, #252525));
-		color: var(--accent, #c8f56c);
-	}
-
-	.btn:disabled {
-		opacity: 0.38;
+	.icon-btn:disabled {
+		opacity: 0.3;
 		cursor: not-allowed;
 	}
 
-	.segmented {
-		gap: 0;
-		border: 1px solid var(--line, #252525);
-		border-radius: 2px;
-		overflow: hidden;
-	}
-
-	.seg {
-		border: 0;
-		border-radius: 0;
-		padding: 0.22rem 0.42rem;
-		font-size: 0.64rem;
-		background: transparent;
-	}
-
-	.seg + .seg {
-		border-left: 1px solid var(--line, #252525);
-	}
-
-	.seg.active {
-		background: color-mix(in srgb, var(--accent, #c8f56c) 16%, transparent);
-		color: var(--accent, #c8f56c);
-	}
-
-	.timings {
-		gap: 0.65rem;
-		margin-left: auto;
-		font-size: 0.62rem;
-		color: var(--muted, #817d75);
-		white-space: nowrap;
-	}
-
-	.timings b {
-		color: var(--text-soft, #b4b1a9);
-		font-weight: 500;
+	.icon-btn svg {
+		width: 13px;
+		height: 13px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.7;
+		stroke-linecap: round;
+		stroke-linejoin: round;
 	}
 
 	.stage {
 		display: grid;
-		grid-template-columns: minmax(0, 1.18fr) minmax(0, 0.82fr);
-		gap: 0.65rem;
-		padding: 0.8rem 0.85rem 0.2rem;
-		align-items: start;
+		grid-template-columns: minmax(150px, 210px) minmax(64px, 1fr) minmax(170px, 230px);
+		grid-auto-rows: minmax(78px, auto);
+		row-gap: 11px;
+		padding: 0.9rem 0.85rem;
+		align-items: stretch;
 	}
 
-	.section-head {
-		justify-content: space-between;
-		gap: 0.5rem;
-		margin-bottom: 0.42rem;
-		font-size: 0.6rem;
-		letter-spacing: 0.11em;
-		text-transform: uppercase;
-		color: var(--muted, #817d75);
-	}
-
-	.tag {
-		padding: 0.05rem 0.3rem;
-		border: 1px solid var(--line, #252525);
-		border-radius: 2px;
-		font-size: 0.56rem;
-		letter-spacing: 0.06em;
-	}
-
-	.nodes {
+	.node-cell {
+		grid-column: 1;
 		display: flex;
-		flex-direction: column;
-		gap: 0.38rem;
 		min-width: 0;
 	}
 
 	.node {
 		position: relative;
-		padding: 0.48rem 0.55rem 0.42rem;
+		display: flex;
+		flex: 1;
+		flex-direction: column;
+		justify-content: space-between;
+		gap: 0.55rem;
+		min-width: 0;
+		min-height: 78px;
+		padding: 0.55rem 0.6rem 0.5rem;
 		border: 1px solid var(--line, #252525);
 		border-radius: 2px;
-		background: color-mix(in srgb, var(--bg-elevated, #151515) 42%, transparent);
+		background: color-mix(in srgb, var(--bg-elevated, #151515) 46%, transparent);
 		transition:
 			border-color 180ms ease,
-			background 180ms ease,
-			opacity 180ms ease;
+			background 180ms ease;
 	}
 
 	.node.leader {
-		border-color: color-mix(in srgb, var(--accent, #c8f56c) 42%, var(--line, #252525));
+		border-color: color-mix(in srgb, var(--accent, #c8f56c) 45%, var(--line, #252525));
 		background:
 			linear-gradient(
 				90deg,
 				color-mix(in srgb, var(--accent, #c8f56c) 10%, transparent),
-				transparent 62%
+				transparent 65%
 			),
-			color-mix(in srgb, var(--bg-elevated, #151515) 58%, transparent);
+			color-mix(in srgb, var(--bg-elevated, #151515) 60%, transparent);
 	}
 
 	.node.leader::before {
 		content: '';
 		position: absolute;
 		left: -1px;
-		top: 7px;
-		bottom: 7px;
+		top: 8px;
+		bottom: 8px;
 		width: 2px;
 		background: var(--accent, #c8f56c);
 	}
 
-	.node.offline {
-		opacity: 0.55;
+	.node.dead {
 		border-style: dashed;
+		background: color-mix(in srgb, var(--bg-soft, #101010) 42%, transparent);
+	}
+
+	.node.dead .node-id {
+		color: var(--muted, #817d75);
+	}
+
+	.node.dead .role-dot {
+		opacity: 0.4;
 	}
 
 	.node-top {
 		gap: 0.42rem;
+		min-width: 0;
+	}
+
+	.role-dot {
+		width: 5px;
+		height: 5px;
+		flex: none;
+		border: 1px solid var(--line-strong, #3b3b3b);
+		border-radius: 50%;
+		background: transparent;
+		transition:
+			background 180ms ease,
+			border-color 180ms ease,
+			box-shadow 180ms ease;
+	}
+
+	.role-dot.on {
+		border-color: var(--accent, #c8f56c);
+		background: var(--accent, #c8f56c);
+		box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent, #c8f56c) 14%, transparent);
 	}
 
 	.node-id {
-		font-size: 0.74rem;
-		font-weight: 500;
-		color: var(--text, #e8e6e0);
-	}
-
-	.badge {
-		padding: 0.02rem 0.28rem;
-		border-radius: 2px;
-		font-size: 0.53rem;
-		letter-spacing: 0.09em;
-		text-transform: uppercase;
-		line-height: 1.6;
-	}
-
-	.badge-leader {
-		background: var(--accent, #c8f56c);
-		color: var(--bg, #0b0b0b);
-	}
-
-	.badge-follower {
-		border: 1px solid var(--line-strong, #3b3b3b);
-		color: var(--muted, #817d75);
-	}
-
-	.badge-offline {
-		border: 1px solid var(--line, #252525);
-		color: var(--muted, #817d75);
-	}
-
-	.node-toggle {
-		margin-left: auto;
-		padding: 0.14rem 0.38rem;
-		font-size: 0.56rem;
-		background: transparent;
-	}
-
-	.node-action {
-		display: flex;
-		gap: 0.3rem;
-		min-width: 0;
-		margin-top: 0.3rem;
-		font-size: 0.63rem;
-		color: var(--muted, #817d75);
-	}
-
-	.node-action .arrow {
-		color: var(--line-strong, #3b3b3b);
-	}
-
-	.node-action span:last-child {
+		flex: 1 1 auto;
 		overflow: hidden;
+		color: var(--text, #e8e6e0);
+		font-size: 0.72rem;
+		font-weight: 500;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 
-	.node-action.ok {
-		color: var(--ok);
+	.power-btn {
+		display: grid;
+		flex: none;
+		place-items: center;
+		width: 18px;
+		height: 18px;
+		padding: 0;
+		margin: 0 -0.15rem 0 0;
+		border: 1px solid transparent;
+		border-radius: 2px;
+		background: transparent;
+		color: color-mix(in srgb, var(--muted, #817d75) 55%, transparent);
+		cursor: pointer;
+		transition:
+			color 140ms ease,
+			border-color 140ms ease,
+			background 140ms ease;
 	}
 
-	.node-action.renew {
-		color: var(--accent-dim, #94b44f);
-	}
-
-	.node-action.miss {
-		color: var(--muted, #817d75);
-	}
-
-	.node-action.bad {
+	.power-btn:hover {
+		border-color: var(--line, #252525);
+		background: var(--bg-soft, #101010);
 		color: var(--danger);
 	}
 
-	.node-action.warn {
-		color: var(--warn);
+	.power-btn svg {
+		width: 11px;
+		height: 11px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.8;
+		stroke-linecap: round;
 	}
 
-	.node-foot {
+	.node.dead .power-btn {
+		color: var(--danger);
+	}
+
+	.node-bottom {
 		justify-content: space-between;
-		gap: 0.5rem;
-		margin-top: 0.35rem;
-		padding-top: 0.3rem;
-		border-top: 1px solid color-mix(in srgb, var(--line, #252525) 65%, transparent);
+		gap: 0.4rem;
+		min-height: 0.8rem;
 	}
 
-	.steps {
+	.leader-tag {
+		color: var(--accent, #c8f56c);
+		font-size: 0.51rem;
+		letter-spacing: 0.1em;
+		text-transform: uppercase;
+	}
+
+	.pips {
 		display: flex;
-		gap: 0.35rem;
-		font-size: 0.53rem;
-		letter-spacing: 0.06em;
-		color: color-mix(in srgb, var(--muted, #817d75) 55%, transparent);
+		gap: 2px;
+		margin-left: auto;
 	}
 
-	.steps .active {
+	.pip {
+		width: 3px;
+		height: 3px;
+		border-radius: 50%;
+		background: var(--line-strong, #3b3b3b);
+	}
+
+	.pip.on {
+		background: var(--danger);
+	}
+
+	.link-cell {
+		position: relative;
+		grid-column: 2;
+		min-height: 78px;
+	}
+
+	.wire {
+		position: absolute;
+		top: 50%;
+		right: 0;
+		left: 0;
+		height: 1px;
+		background: var(--line-strong, #3b3b3b);
+		transition:
+			background 180ms ease,
+			border-color 180ms ease;
+	}
+
+	.arrowhead {
+		position: absolute;
+		top: 50%;
+		right: -1px;
+		transform: translateY(-50%);
+		border-top: 4px solid transparent;
+		border-bottom: 4px solid transparent;
+		border-left: 5px solid var(--line-strong, #3b3b3b);
+		transition: border-color 180ms ease;
+	}
+
+	.link-cell.leader .wire {
+		background: color-mix(in srgb, var(--accent, #c8f56c) 60%, var(--line, #252525));
+	}
+
+	.link-cell.leader .arrowhead {
+		border-left-color: var(--accent, #c8f56c);
+	}
+
+	.link-cell.cut .wire {
+		top: 50%;
+		height: 0;
+		border-top: 1px dashed var(--danger);
+		background: transparent;
+	}
+
+	.link-cell.cut .arrowhead {
+		border-left-color: color-mix(in srgb, var(--danger) 60%, var(--line, #252525));
+	}
+
+	.link-cell.dead {
+		opacity: 0.45;
+	}
+
+	.link-cell.dead .wire {
+		background: var(--line, #252525);
+	}
+
+	.link-cell.dead .arrowhead {
+		border-left-color: var(--line, #252525);
+	}
+
+	.link-btn {
+		position: absolute;
+		top: 50%;
+		left: 50%;
+		z-index: 2;
+		display: grid;
+		place-items: center;
+		width: 24px;
+		height: 24px;
+		padding: 0;
+		border: 1px solid var(--line-strong, #3b3b3b);
+		border-radius: 2px;
+		background: var(--bg-soft, #101010);
+		color: var(--muted, #817d75);
+		cursor: pointer;
+		transform: translate(-50%, -50%);
+		transition:
+			color 140ms ease,
+			border-color 140ms ease,
+			background 140ms ease;
+	}
+
+	.link-btn:hover:not(:disabled) {
+		border-color: var(--accent, #c8f56c);
 		color: var(--accent, #c8f56c);
 	}
 
-	.next {
-		font-size: 0.55rem;
-		color: var(--muted, #817d75);
-		white-space: nowrap;
-		font-variant-numeric: tabular-nums;
+	.link-btn:disabled {
+		cursor: not-allowed;
+	}
+
+	.link-btn svg {
+		width: 12px;
+		height: 12px;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 1.8;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+
+	.link-cell.cut .link-btn {
+		border-color: color-mix(in srgb, var(--danger) 55%, var(--line, #252525));
+		background: color-mix(in srgb, var(--danger) 9%, var(--bg-soft, #101010));
+		color: var(--danger);
+	}
+
+	.slash {
+		position: absolute;
+		width: 15px;
+		height: 1.5px;
+		border-radius: 1px;
+		background: var(--danger);
+		transform: rotate(-45deg);
+	}
+
+	.packet {
+		position: absolute;
+		top: 50%;
+		left: 0;
+		z-index: 1;
+		width: 5px;
+		height: 5px;
+		margin-top: -2.5px;
+		border-radius: 50%;
+		background: var(--accent, #c8f56c);
+		box-shadow: 0 0 6px color-mix(in srgb, var(--accent, #c8f56c) 45%, transparent);
+		pointer-events: none;
+		animation: flow-out 520ms ease-out forwards;
+	}
+
+	@keyframes flow-out {
+		0% {
+			left: 0;
+			opacity: 0;
+		}
+		20% {
+			opacity: 1;
+		}
+		100% {
+			left: calc(100% - 6px);
+			opacity: 0;
+		}
 	}
 
 	.storage {
-		padding: 0.5rem 0.58rem;
+		grid-column: 3;
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+		gap: 0.42rem;
+		min-width: 0;
+		padding: 0.75rem;
 		border: 1px solid var(--line, #252525);
 		border-radius: 2px;
-		background: color-mix(in srgb, var(--bg-soft, #101010) 68%, transparent);
+		background: color-mix(in srgb, var(--bg-soft, #101010) 62%, transparent);
+		transition:
+			border-color 180ms ease,
+			background 180ms ease;
 	}
 
-	.status {
-		padding: 0.05rem 0.32rem;
+	.storage.held {
+		border-color: color-mix(in srgb, var(--accent, #c8f56c) 35%, var(--line, #252525));
+	}
+
+	.storage.expired {
+		border-color: color-mix(in srgb, var(--warn) 30%, var(--line, #252525));
+	}
+
+	.storage-top {
+		justify-content: space-between;
+		gap: 0.5rem;
+	}
+
+	.storage-title {
+		color: var(--muted, #817d75);
+		font-size: 0.57rem;
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+	}
+
+	.state-pill {
+		padding: 0.02rem 0.28rem;
 		border: 1px solid var(--line-strong, #3b3b3b);
 		border-radius: 2px;
-		font-size: 0.55rem;
-		letter-spacing: 0.08em;
+		color: var(--muted, #817d75);
+		font-size: 0.5rem;
+		letter-spacing: 0.07em;
+		text-transform: uppercase;
 	}
 
-	.status.held {
+	.state-pill.held {
 		border-color: color-mix(in srgb, var(--accent, #c8f56c) 45%, var(--line, #252525));
 		color: var(--accent, #c8f56c);
 	}
 
-	.status.expired {
+	.state-pill.expired {
 		border-color: color-mix(in srgb, var(--warn) 45%, var(--line, #252525));
 		color: var(--warn);
 	}
 
-	.record {
-		display: flex;
-		flex-direction: column;
-		gap: 0.29rem;
-		padding: 0.48rem 0.52rem;
+	.key-chip {
+		align-self: flex-start;
+		max-width: 100%;
+		overflow: hidden;
+		padding: 0.02rem 0.28rem;
 		border: 1px solid var(--line, #252525);
 		border-radius: 2px;
 		background: color-mix(in srgb, var(--bg, #0b0b0b) 35%, transparent);
-	}
-
-	.record-line {
-		gap: 0.6rem;
-		font-size: 0.66rem;
-	}
-
-	.record-label {
-		width: 3.6rem;
-		flex: none;
 		color: var(--muted, #817d75);
-		font-size: 0.58rem;
-		letter-spacing: 0.04em;
-	}
-
-	.record-value {
-		min-width: 0;
-		overflow: hidden;
+		font-size: 0.57rem;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		color: var(--text-soft, #b4b1a9);
-		font-variant-numeric: tabular-nums;
 	}
 
-	.record-value.key {
-		color: var(--muted, #817d75);
-	}
-
-	.record-value.holder {
+	.storage-value {
+		min-height: 1.55em;
+		overflow: hidden;
 		color: var(--accent, #c8f56c);
+		font-size: 1.02rem;
 		font-weight: 500;
+		line-height: 1.35;
+		text-align: center;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 
-	.record-value.holder.empty {
+	.storage-value.empty {
 		color: var(--muted, #817d75);
 		font-weight: 400;
 	}
 
-	.record-value.holder.stale {
+	.storage-value.stale {
 		color: var(--warn);
+		font-weight: 400;
 		text-decoration: line-through;
 		text-decoration-thickness: 1px;
 	}
 
-	.lease {
-		margin-top: 0.6rem;
-	}
-
-	.lease-head {
-		justify-content: space-between;
-		margin-bottom: 0.24rem;
-		font-size: 0.57rem;
-		letter-spacing: 0.06em;
-		color: var(--muted, #817d75);
-		text-transform: uppercase;
-	}
-
-	.lease-ms {
-		text-transform: none;
-		font-variant-numeric: tabular-nums;
-		color: var(--text-soft, #b4b1a9);
-	}
-
 	.lease-track {
-		height: 5px;
-		border-radius: 1px;
-		background: color-mix(in srgb, var(--line, #252525) 78%, transparent);
+		height: 4px;
 		overflow: hidden;
+		border-radius: 1px;
+		background: color-mix(in srgb, var(--line, #252525) 80%, transparent);
 	}
 
 	.lease-fill {
+		display: block;
 		height: 100%;
 		background: var(--accent, #c8f56c);
 		transition: width 80ms linear;
@@ -982,163 +1012,137 @@
 		background: var(--warn);
 	}
 
-	.lease-fill.expired {
-		width: 0 !important;
-	}
-
-	.storage-stats {
-		gap: 0.6rem;
-		margin-top: 0.55rem;
-		font-size: 0.55rem;
+	.lease-time {
+		min-height: 0.8em;
 		color: var(--muted, #817d75);
-		font-variant-numeric: tabular-nums;
-		flex-wrap: wrap;
-	}
-
-	.storage-stats b {
-		font-weight: 500;
-		color: var(--text-soft, #b4b1a9);
-	}
-
-	.storage-note {
-		margin: 0.55rem 0 0;
-		padding-top: 0.42rem;
-		border-top: 1px solid color-mix(in srgb, var(--line, #252525) 65%, transparent);
-		font-size: 0.58rem;
-		line-height: 1.45;
-		color: var(--muted, #817d75);
-	}
-
-	.storage-note b {
-		font-weight: 500;
-		color: var(--text-soft, #b4b1a9);
-	}
-
-	.events {
-		margin: 0.6rem 0.85rem 0;
-		padding-top: 0.55rem;
-		border-top: 1px solid var(--line, #252525);
-	}
-
-	.event-list {
-		display: flex;
-		flex-direction: column;
-		max-height: 10.5rem;
-		overflow-y: auto;
-		scrollbar-width: thin;
-		scrollbar-color: var(--line-strong, #3b3b3b) transparent;
-	}
-
-	.event-row {
-		display: grid;
-		grid-template-columns: 4.2rem 4.2rem 3.9rem minmax(0, 1fr);
-		gap: 0.5rem;
-		padding: 0.2rem 0.1rem;
-		border-bottom: 1px solid color-mix(in srgb, var(--line, #252525) 42%, transparent);
-		font-size: 0.6rem;
-		line-height: 1.45;
-	}
-
-	.event-row:last-child {
-		border-bottom: 0;
-	}
-
-	.event-time {
-		color: color-mix(in srgb, var(--muted, #817d75) 65%, transparent);
+		font-size: 0.54rem;
 		font-variant-numeric: tabular-nums;
 		text-align: right;
 	}
 
-	.event-actor {
-		color: var(--text-soft, #b4b1a9);
+	.status-line {
+		gap: 0.42rem;
+		min-height: 2rem;
+		padding: 0.42rem 0.85rem 0.5rem;
+		border-top: 1px solid var(--line, #252525);
+		color: var(--muted, #817d75);
+		font-size: 0.59rem;
+	}
+
+	.status-pip {
+		width: 4px;
+		height: 4px;
+		flex: none;
+		border-radius: 50%;
+		background: var(--line-strong, #3b3b3b);
+	}
+
+	.status-line.ok .status-pip {
+		background: var(--accent, #c8f56c);
+	}
+
+	.status-line.warn .status-pip {
+		background: var(--warn);
+	}
+
+	.status-line.bad .status-pip {
+		background: var(--danger);
+	}
+
+	.status-text {
+		overflow: hidden;
+		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
 
-	.event-action {
-		font-size: 0.55rem;
-		letter-spacing: 0.07em;
-		text-transform: uppercase;
-		color: var(--muted, #817d75);
-	}
+	@media (max-width: 640px) {
+		.topbar {
+			gap: 0.35rem 0.65rem;
+			padding-inline: 0.6rem;
+		}
 
-	.event-action.ok {
-		color: var(--ok);
-	}
+		.brand-title {
+			font-size: 0.6rem;
+			letter-spacing: 0.1em;
+		}
 
-	.event-action.renew {
-		color: var(--accent-dim, #94b44f);
-	}
+		.speed {
+			gap: 0.25rem;
+		}
 
-	.event-action.miss {
-		color: var(--muted, #817d75);
-	}
+		.speed input {
+			width: 48px;
+		}
 
-	.event-action.warn {
-		color: var(--warn);
-	}
+		.speed-value {
+			width: 1.8rem;
+			font-size: 0.5rem;
+		}
 
-	.event-action.bad {
-		color: var(--danger);
-	}
+		.icon-btn {
+			width: 24px;
+			height: 24px;
+		}
 
-	.event-detail {
-		color: var(--text-soft, #b4b1a9);
-		overflow-wrap: anywhere;
-	}
-
-	.demo-foot {
-		padding: 0.65rem 0.85rem 0.75rem;
-		border-top: 1px solid var(--line, #252525);
-		margin-top: 0.6rem;
-	}
-
-	.legend {
-		flex-wrap: wrap;
-		gap: 0.25rem 0.9rem;
-		font-size: 0.56rem;
-		color: var(--muted, #817d75);
-	}
-
-	.legend b {
-		font-weight: 500;
-		color: var(--text-soft, #b4b1a9);
-	}
-
-	.hint {
-		margin: 0.45rem 0 0;
-		font-size: 0.58rem;
-		line-height: 1.5;
-		color: var(--muted, #817d75);
-	}
-
-	.hint code,
-	.storage-note code {
-		padding: 0.02rem 0.22rem;
-		border: 1px solid var(--line, #252525);
-		border-radius: 2px;
-		background: color-mix(in srgb, var(--bg, #0b0b0b) 40%, transparent);
-		color: var(--text-soft, #b4b1a9);
-		font-size: 0.92em;
-	}
-
-	@media (max-width: 700px) {
 		.stage {
-			grid-template-columns: minmax(0, 1fr);
+			grid-template-columns: minmax(112px, 1fr) 42px minmax(118px, 0.9fr);
+			grid-auto-rows: minmax(64px, auto);
+			row-gap: 8px;
+			padding: 0.65rem 0.6rem;
 		}
 
-		.timings {
-			margin-left: 0;
-			width: 100%;
+		.node {
+			min-height: 64px;
+			padding: 0.45rem 0.5rem 0.4rem;
 		}
 
-		.event-row {
-			grid-template-columns: 3.6rem 3.8rem 3.4rem minmax(0, 1fr);
-			gap: 0.35rem;
-			font-size: 0.56rem;
+		.node-id {
+			font-size: 0.64rem;
 		}
 
-		.brand-sub {
-			display: none;
+		.leader-tag {
+			font-size: 0.46rem;
+		}
+
+		.link-cell {
+			min-height: 64px;
+		}
+
+		.link-btn {
+			width: 22px;
+			height: 22px;
+		}
+
+		.power-btn {
+			width: 16px;
+			height: 16px;
+		}
+
+		.link-btn svg {
+			width: 10px;
+			height: 10px;
+		}
+
+		.storage {
+			gap: 0.32rem;
+			padding: 0.5rem 0.45rem;
+		}
+
+		.storage-title {
+			font-size: 0.5rem;
+		}
+
+		.storage-value {
+			font-size: 0.82rem;
+		}
+
+		.state-pill,
+		.key-chip {
+			font-size: 0.46rem;
+		}
+
+		.status-line {
+			font-size: 0.55rem;
 		}
 	}
 
@@ -1147,9 +1151,8 @@
 			animation: none;
 		}
 
-		.lease-fill,
-		.node {
-			transition: none;
+		.packet {
+			display: none;
 		}
 	}
 </style>
