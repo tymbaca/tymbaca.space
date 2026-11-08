@@ -82,4 +82,7 @@ if election.IsLeader() {
 
 ![](include/BalancedLeaderElection.svelte)
 
+Ну и было бы круто, если бы это кто-то реализовал. \
+Держи: https://github.com/tymbaca/less
+
 Как-то так.
