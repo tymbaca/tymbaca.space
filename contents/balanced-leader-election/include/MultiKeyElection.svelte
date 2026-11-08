@@ -1,35 +1,31 @@
 <script>
 	import { onMount } from 'svelte';
 
-	const KEYS = Array.from({ length: 9 }, (_, index) => `job${index + 1}`);
+	const KEY_POOL = Array.from({ length: 12 }, (_, index) => `job${index + 1}`);
 	const NODE_IDS = ['node-1', 'node-2', 'node-3'];
+
+	const MIN_JOBS = 6;
+	const MAX_JOBS = 12;
+	const MIN_NODES = 2;
+	const MAX_NODES = 6;
+
 	const TTL_MS = 2800;
 	const FOLLOW_MS = 800;
 	const HOLD_MS = 400;
 	const ERRS_TO_FALLBACK = 3;
 
-	// Deliberately uneven start: five jobs prefer node-1, three prefer
-	// node-2, one prefers node-3. With no balancer this distribution sticks.
-	const PREFERRED = [
-		'node-1',
-		'node-1',
-		'node-1',
-		'node-1',
-		'node-1',
-		'node-2',
-		'node-2',
-		'node-2',
-		'node-3'
-	];
-
 	let now = $state(0);
 	let running = $state(true);
 	let speed = $state(1);
+	let jobs = $state(9);
 	let nodes = $state(makeNodes());
-	let candidates = $state(makeCandidates());
+	let candidates = $state(makeCandidates(nodes));
 	let records = $state(makeRecords());
 	let status = $state('waiting for claims');
 	let statusTone = $state('muted');
+	let nextNodeNumber = 4;
+
+	let activeKeys = $derived(KEY_POOL.slice(0, jobs));
 
 	function makeNodes() {
 		return NODE_IDS.map((id) => ({ id, alive: true, connected: true }));
@@ -37,16 +33,23 @@
 
 	function makeRecords() {
 		return Object.fromEntries(
-			KEYS.map((key) => [key, { value: '', deadline: 0, expiredLogged: false }])
+			KEY_POOL.map((key) => [key, { value: '', deadline: 0, expiredLogged: false }])
 		);
 	}
 
-	function makeCandidates() {
+	// Deliberately uneven start: most keys prefer the first node, some the
+	// second and the rest the third. With no balancer the distribution sticks.
+	function preferredOwner(keyIndex, roster) {
+		const slot = keyIndex < 5 ? 0 : keyIndex < 8 ? 1 : 2;
+		return roster[Math.min(slot, roster.length - 1)].id;
+	}
+
+	function makeCandidates(roster) {
 		const list = [];
 
-		KEYS.forEach((key, index) => {
-			const preferred = PREFERRED[index];
-			const order = [preferred, ...NODE_IDS.filter((id) => id !== preferred)];
+		KEY_POOL.forEach((key, index) => {
+			const preferred = preferredOwner(index, roster);
+			const order = [preferred, ...roster.map((node) => node.id).filter((id) => id !== preferred)];
 
 			order.forEach((node, rank) => {
 				list.push({
@@ -78,7 +81,7 @@
 
 	function heldCount(nodeId) {
 		let count = 0;
-		for (const key of KEYS) {
+		for (const key of activeKeys) {
 			if (isHeldBy(key, nodeId)) count += 1;
 		}
 		return count;
@@ -160,7 +163,7 @@
 	}
 
 	function tick() {
-		for (const key of KEYS) {
+		for (const key of activeKeys) {
 			const record = records[key];
 
 			if (record.value && record.deadline <= now && !record.expiredLogged) {
@@ -170,6 +173,8 @@
 		}
 
 		for (const candidate of candidates) {
+			if (KEY_POOL.indexOf(candidate.key) >= jobs) continue;
+
 			const node = nodeById(candidate.node);
 			if (!node || !node.alive) continue;
 
@@ -189,6 +194,7 @@
 
 			for (const candidate of candidates) {
 				if (candidate.node !== node.id) continue;
+				if (KEY_POOL.indexOf(candidate.key) >= jobs) continue;
 
 				candidate.errors = 0;
 				const record = records[candidate.key];
@@ -250,14 +256,115 @@
 		setStatus(`${node.id} started`, 'ok');
 	}
 
+	function addNode() {
+		if (nodes.length >= MAX_NODES) return;
+
+		const node = { id: `node-${nextNodeNumber}`, alive: true, connected: true };
+		nextNodeNumber += 1;
+		nodes.push(node);
+
+		for (const key of KEY_POOL) {
+			candidates.push({
+				key,
+				node: node.id,
+				phase: 'following',
+				nextAt: now + 140 + Math.random() * 300,
+				errors: 0
+			});
+		}
+
+		setStatus(`${node.id} joined — ${nodes.length} nodes`, 'muted');
+	}
+
+	function removeNode() {
+		if (nodes.length <= MIN_NODES) return;
+
+		const node = nodes[nodes.length - 1];
+		const freedKeys = [];
+
+		for (const key of activeKeys) {
+			const record = records[key];
+			if (record.value !== node.id || record.deadline <= now) continue;
+			record.deadline = now;
+			record.expiredLogged = true;
+			freedKeys.push(key);
+		}
+
+		candidates = candidates.filter((candidate) => candidate.node !== node.id);
+		nodes.pop();
+		nextNodeNumber = nodes.length + 1;
+
+		for (const candidate of candidates) {
+			if (!freedKeys.includes(candidate.key) || candidate.phase !== 'following') continue;
+			candidate.nextAt = Math.min(candidate.nextAt, now + 140 + Math.random() * 260);
+		}
+
+		setStatus(
+			freedKeys.length > 0
+				? `${node.id} removed — released ${freedKeys.length} ${freedKeys.length === 1 ? 'key' : 'keys'}`
+				: `${node.id} removed — ${nodes.length} nodes`,
+			'warn'
+		);
+	}
+
+	function setJobs(next) {
+		const target = Math.max(MIN_JOBS, Math.min(MAX_JOBS, next));
+		if (target === jobs) return;
+
+		const previous = jobs;
+		const added = target > previous;
+		jobs = target;
+
+		if (added) {
+			for (const key of KEY_POOL.slice(previous, target)) {
+				records[key] = { value: '', deadline: 0, expiredLogged: false };
+
+				const keyIndex = KEY_POOL.indexOf(key);
+				const preferred = preferredOwner(keyIndex, nodes);
+				const order = [
+					preferred,
+					...nodes.map((node) => node.id).filter((id) => id !== preferred)
+				];
+
+				for (const candidate of candidates) {
+					if (candidate.key !== key) continue;
+					const rank = order.indexOf(candidate.node);
+					candidate.phase = 'following';
+					candidate.errors = 0;
+					candidate.nextAt = now + (rank >= 0 ? rank * 45 : 260) + Math.random() * 40;
+				}
+			}
+		} else {
+			for (const key of KEY_POOL.slice(target, previous)) {
+				records[key] = { value: '', deadline: 0, expiredLogged: false };
+
+				for (const candidate of candidates) {
+					if (candidate.key !== key) continue;
+					candidate.phase = 'following';
+					candidate.errors = 0;
+					candidate.nextAt = now + 500 + Math.random() * 400;
+				}
+			}
+		}
+
+		setStatus(
+			added
+				? `${KEY_POOL[target - 1]} added — L=${target}`
+				: `${KEY_POOL[previous - 1]} removed — L=${target}`,
+			'muted'
+		);
+	}
+
 	function toggleRunning() {
 		running = !running;
 	}
 
 	function reset() {
 		now = 0;
+		jobs = 9;
+		nextNodeNumber = 4;
 		nodes = makeNodes();
-		candidates = makeCandidates();
+		candidates = makeCandidates(nodes);
 		records = makeRecords();
 		running = true;
 		setStatus('waiting for claims', 'muted');
@@ -281,7 +388,7 @@
 	});
 </script>
 
-<section class="demo" aria-label="Leader election with nine independent keys">
+<section class="demo" aria-label="Leader election with independent keys">
 	<header class="topbar">
 		<div class="brand">
 			<span class="live-dot" class:paused={!running} aria-hidden="true"></span>
@@ -334,7 +441,68 @@
 		</div>
 	</header>
 
-	<div class="board">
+	<div class="metrics">
+		<div class="metric jobs-metric">
+			<span class="metric-key">L</span>
+			<div class="stepper">
+				<button
+					type="button"
+					onclick={() => setJobs(jobs - 1)}
+					disabled={jobs <= MIN_JOBS}
+					title="Remove a job"
+					aria-label="Remove a job"
+				>
+					−
+				</button>
+				<b>{jobs}</b>
+				<button
+					type="button"
+					onclick={() => setJobs(jobs + 1)}
+					disabled={jobs >= MAX_JOBS}
+					title="Add a job"
+					aria-label="Add a job"
+				>
+					+
+				</button>
+			</div>
+			<span class="metric-note">jobs</span>
+		</div>
+
+		<div class="metric">
+			<span class="metric-key">N</span>
+			<div class="stepper">
+				<button
+					type="button"
+					onclick={removeNode}
+					disabled={nodes.length <= MIN_NODES}
+					title="Remove a node"
+					aria-label="Remove a node"
+				>
+					−
+				</button>
+				<b>{nodes.length}</b>
+				<button
+					type="button"
+					onclick={addNode}
+					disabled={nodes.length >= MAX_NODES}
+					title="Add a node"
+					aria-label="Add a node"
+				>
+					+
+				</button>
+			</div>
+			<span class="metric-note">nodes</span>
+		</div>
+
+		<span class="state-pill" title="There is no balancer: keys stay wherever they were claimed">
+			no balancer
+		</span>
+	</div>
+
+	<div
+		class="board"
+		style={`grid-template-columns: 3.2rem repeat(${nodes.length}, minmax(4rem, 1fr))`}
+	>
 		<span class="corner">storage</span>
 
 		{#each nodes as node, column (node.id)}
@@ -388,13 +556,13 @@
 					</div>
 				</div>
 
-				<div class="count" aria-label={`${heldCount(node.id)} of ${KEYS.length} keys`}>
-					<b>{heldCount(node.id)}</b><span>/{KEYS.length}</span>
+				<div class="count" aria-label={`${heldCount(node.id)} of ${jobs} keys`}>
+					<b>{heldCount(node.id)}</b><span>/{jobs}</span>
 				</div>
 			</div>
 		{/each}
 
-		{#each KEYS as key, row (key)}
+		{#each activeKeys as key, row (key)}
 			<div class="key-name" style={`grid-row: ${row + 2}`}>{key}</div>
 
 			{#each nodes as node, column (node.id)}
@@ -449,6 +617,9 @@
 	.topbar,
 	.brand,
 	.actions,
+	.metrics,
+	.metric,
+	.stepper,
 	.node-line,
 	.node-tools,
 	.count,
@@ -568,12 +739,104 @@
 		stroke-linejoin: round;
 	}
 
+	.metrics {
+		flex-wrap: wrap;
+		gap: 0.4rem 1.1rem;
+		padding: 0.5rem 0.85rem;
+		border-bottom: 1px solid var(--line, #252525);
+		background: color-mix(in srgb, var(--bg-soft, #101010) 45%, transparent);
+		font-size: 0.57rem;
+		color: var(--muted, #817d75);
+	}
+
+	.metric {
+		gap: 0.32rem;
+		min-width: 0;
+	}
+
+	.metric b {
+		color: var(--text, #e8e6e0);
+		font-size: 0.72rem;
+		font-weight: 500;
+		font-variant-numeric: tabular-nums;
+		line-height: 1;
+	}
+
+	.metric-key {
+		display: inline-grid;
+		place-items: center;
+		width: 1.05rem;
+		height: 1.05rem;
+		border: 1px solid var(--line-strong, #3b3b3b);
+		border-radius: 2px;
+		color: var(--muted, #817d75);
+		font-size: 0.52rem;
+		line-height: 1;
+	}
+
+	.metric-note {
+		color: var(--muted, #817d75);
+		font-size: 0.53rem;
+		letter-spacing: 0.02em;
+	}
+
+	.jobs-metric {
+		gap: 0.35rem;
+	}
+
+	.stepper {
+		gap: 0.1rem;
+	}
+
+	.stepper button {
+		display: grid;
+		place-items: center;
+		width: 16px;
+		height: 16px;
+		padding: 0;
+		border: 1px solid var(--line, #252525);
+		border-radius: 2px;
+		background: transparent;
+		color: var(--muted, #817d75);
+		font-family: inherit;
+		font-size: 0.7rem;
+		line-height: 1;
+		cursor: pointer;
+		transition:
+			color 140ms ease,
+			border-color 140ms ease;
+	}
+
+	.stepper button:hover:not(:disabled) {
+		border-color: var(--accent, #c8f56c);
+		color: var(--accent, #c8f56c);
+	}
+
+	.stepper button:disabled {
+		opacity: 0.35;
+		cursor: not-allowed;
+	}
+
+	.state-pill {
+		margin-left: auto;
+		padding: 0.05rem 0.34rem;
+		border: 1px solid var(--line-strong, #3b3b3b);
+		border-radius: 2px;
+		color: var(--muted, #817d75);
+		font-size: 0.49rem;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+	}
+
 	.board {
 		display: grid;
-		grid-template-columns: 3.2rem repeat(3, minmax(0, 1fr));
 		gap: 6px 8px;
 		padding: 0.8rem 0.85rem 0.9rem;
 		align-items: stretch;
+		overflow-x: auto;
+		overscroll-behavior-x: contain;
+		scrollbar-width: thin;
+		scrollbar-color: var(--line-strong, #3b3b3b) transparent;
 	}
 
 	.corner {
@@ -859,29 +1122,37 @@
 			height: 24px;
 		}
 
+		.metrics {
+			gap: 0.35rem 0.7rem;
+			padding: 0.45rem 0.6rem;
+		}
+
+		.metric b {
+			font-size: 0.66rem;
+		}
+
 		.board {
-			grid-template-columns: 2.7rem repeat(3, minmax(0, 1fr));
 			gap: 4px 5px;
 			padding: 0.65rem 0.6rem 0.75rem;
 		}
 
 		.node-head {
 			min-height: 48px;
-			padding: 0.35rem 0.35rem 0.32rem;
+			padding: 0.35rem 0.28rem 0.32rem;
 		}
 
 		.node-id {
-			font-size: 0.58rem;
+			font-size: 0.5rem;
 		}
 
 		.tool {
-			width: 15px;
-			height: 15px;
+			width: 12px;
+			height: 12px;
 		}
 
 		.tool svg {
-			width: 9px;
-			height: 9px;
+			width: 7px;
+			height: 7px;
 		}
 
 		.cell {
