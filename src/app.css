@@ -23,6 +23,13 @@
 	--inline-code-color: #c8f56c;
 	--code-bg: #101010;
 	--code-border: #272727;
+	--code-text: #dedad0;
+	--code-muted: #6f6f69;
+	--code-control-bg: #161616;
+	--code-control-border: #2b2b2b;
+	--code-control-text: #8a8a83;
+	--code-control-hover-text: #e8e6e0;
+	--code-control-hover-border: #3d3d3d;
 
 	--radius: 3px;
 	--shell: 1080px;
@@ -46,8 +53,15 @@ html[data-theme='light'] {
 	--selection-text: #1c2108;
 	--inline-code-bg: #e9e7e0;
 	--inline-code-color: #465700;
-	--code-bg: #101010;
-	--code-border: #272727;
+	--code-bg: #efede7;
+	--code-border: #d7d4cb;
+	--code-text: #2c2a26;
+	--code-muted: #8a867d;
+	--code-control-bg: #e9e7e1;
+	--code-control-border: #d7d4cb;
+	--code-control-text: #6d6961;
+	--code-control-hover-text: #171614;
+	--code-control-hover-border: #b6b2a7;
 }
 
 *,
@@ -353,7 +367,7 @@ textarea {
 	border: 1px solid var(--code-border);
 	border-radius: var(--radius);
 	background: var(--code-bg) !important;
-	color: #dedad0;
+	color: var(--code-text);
 	font-size: 0.8rem;
 	line-height: 1.72;
 	tab-size: 2;
@@ -377,7 +391,7 @@ textarea {
 	font-size: 0.56rem;
 	letter-spacing: 0.08em;
 	text-transform: uppercase;
-	color: #6f6f69;
+	color: var(--code-muted);
 	pointer-events: none;
 }
 
@@ -386,10 +400,10 @@ textarea {
 	top: 0.45rem;
 	right: 0.5rem;
 	padding: 0.2rem 0.45rem;
-	border: 1px solid #2b2b2b;
+	border: 1px solid var(--code-control-border);
 	border-radius: 2px;
-	background: #161616;
-	color: #8a8a83;
+	background: var(--code-control-bg);
+	color: var(--code-control-text);
 	font-family: var(--font-mono);
 	font-size: 0.56rem;
 	letter-spacing: 0.06em;
@@ -409,12 +423,21 @@ textarea {
 }
 
 .prose pre .code-copy:hover {
-	color: #e8e6e0;
-	border-color: #3d3d3d;
+	color: var(--code-control-hover-text);
+	border-color: var(--code-control-hover-border);
 }
 
 .prose .shiki {
 	background: var(--code-bg) !important;
+	color: var(--code-text);
+}
+
+.prose .shiki span {
+	color: var(--shiki-light) !important;
+}
+
+html[data-theme='dark'] .prose .shiki span {
+	color: var(--shiki-dark) !important;
 }
 
 .prose .shiki code {
