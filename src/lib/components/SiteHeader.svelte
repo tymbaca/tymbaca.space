@@ -10,7 +10,7 @@
 	<div class="shell header-inner">
 		<a class="wordmark" href="/articles" aria-label={`${site.name} home`}>
 			<span class="mark" aria-hidden="true"></span>
-			<span class="wordmark-name">tymbaca</span><span class="wordmark-tld">.space</span>
+			<span class="wordmark-name">tymbaca<span class="wordmark-tld">.space</span></span>
 		</a>
 
 		<div class="header-actions">
