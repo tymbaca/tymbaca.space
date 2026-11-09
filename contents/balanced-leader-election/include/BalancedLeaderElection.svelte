@@ -31,7 +31,7 @@
 	let running = $state(true);
 	let speed = $state(1);
 
-	let jobs = $state(11);
+	let jobs = $state(9);
 	let nodes = $state(makeRoster());
 	let records = $state(makeRecords());
 	let candidates = $state(makeCandidates(nodes));
@@ -45,7 +45,7 @@
 
 	let activeKeys = $derived(KEY_POOL.slice(0, jobs));
 	let activeCount = $derived(nodes.filter((node) => node.livenessDeadline > now).length);
-	let limit = $derived(activeCount > 0 ? Math.floor(jobs / activeCount) + 1 : 0);
+	let limit = $derived(activeCount > 0 ? Math.ceil(jobs / activeCount) : 0);
 	let heldTotal = $derived(nodes.reduce((sum, node) => sum + heldCount(node.id), 0));
 	let unownedCount = $derived(jobs - heldTotal);
 	let staleCount = $derived(activeKeys.filter((key) => isStale(key)).length);
@@ -231,13 +231,13 @@
 	}
 
 	/**
-	 * Mirrors needDrop in the balancer: M = floor(L / C) + 1, and a node holding
+	 * Mirrors needDrop in the balancer: M = ceil(L / C), and a node holding
 	 * more than M leases receives drop signals for the excess.
 	 */
 	function checkBalance(node) {
 		if (activeCount <= 0) return;
 
-		const currentLimit = Math.floor(jobs / activeCount) + 1;
+		const currentLimit = Math.ceil(jobs / activeCount);
 		const held = heldKeysOf(node.id);
 		const excess = held.length - currentLimit;
 		if (excess <= 0) return;
@@ -380,7 +380,7 @@
 			if (node.wasLive && !live) {
 				const c = activeCount;
 				setStatus(
-					`${node.id} liveness expired → C=${c}, M=${c > 0 ? Math.floor(jobs / c) + 1 : '—'}`,
+					`${node.id} liveness expired → C=${c}, M=${c > 0 ? Math.ceil(jobs / c) : '—'}`,
 					'warn'
 				);
 			}
@@ -503,7 +503,7 @@
 		nudgeChecks();
 
 		const c = nodes.filter((item) => item.livenessDeadline > now).length;
-		setStatus(`${node.id} joined — C=${c}, M=${Math.floor(jobs / c) + 1}`, 'muted');
+		setStatus(`${node.id} joined — C=${c}, M=${Math.ceil(jobs / c)}`, 'muted');
 	}
 
 	function removeNode() {
@@ -528,7 +528,7 @@
 		nudgeChecks();
 
 		setStatus(
-			`${node.id} removed — C=${activeCount}, M=${activeCount > 0 ? Math.floor(jobs / activeCount) + 1 : '—'}`,
+			`${node.id} removed — C=${activeCount}, M=${activeCount > 0 ? Math.ceil(jobs / activeCount) : '—'}`,
 			'warn'
 		);
 	}
@@ -728,7 +728,7 @@
 		<div class="metric formula">
 			<span class="metric-key">M</span>
 			{#if activeCount > 0}
-				<span class="formula-calc">⌊{jobs} / {activeCount}⌋ + 1 =</span>
+				<span class="formula-calc">ceil({jobs} / {activeCount}) =</span>
 				<b>{limit}</b>
 			{:else}
 				<span class="formula-calc">no active nodes</span>
