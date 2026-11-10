@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package backend;
+
+import "google/api/annotations.proto";
+
+option go_package = "github.com/tymbaca/tymbaca.space/backend/api;backend";
+
+service BackendService {
+  rpc IncrementView(IncrementViewReq) returns (IncrementViewResp) {
+    option (google.api.http) = {
+      post: "/api/v1/view/increment"
+      body: "*"
+    };
+  }
+}
+
+message IncrementViewReq {
+  string url = 1;
+  string client_addr = 2;
+}
+
+message IncrementViewResp {}

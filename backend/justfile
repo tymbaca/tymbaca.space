@@ -1,0 +1,25 @@
+set dotenv-filename := "infra.local.env"
+set dotenv-load := true
+
+GOOSE := "go run github.com/pressly/goose/v3/cmd/goose@v3.29.0"
+
+run:
+    go run ./cmd/cars
+
+up:
+    docker compose --env-file infra.local.env up -d --wait
+
+migrations:
+    {{GOOSE}} -dir migrations postgres "$DATABASE_URL" up
+
+# Stop and remove containers, keep data volumes.
+down:
+    docker compose --env-file infra.local.env down
+
+# Stop and remove containers and data volumes.
+rm:
+    docker compose --env-file infra.local.env down -v
+
+generate:
+    easyp mod download
+    easyp generate
