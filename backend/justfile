@@ -4,7 +4,7 @@ set dotenv-load := true
 GOOSE := "go run github.com/pressly/goose/v3/cmd/goose@v3.29.0"
 
 run:
-    go run ./cmd/cars
+    go run ./cmd/backend
 
 up:
     docker compose --env-file infra.local.env up -d --wait

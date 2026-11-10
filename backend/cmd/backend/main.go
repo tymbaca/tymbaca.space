@@ -27,7 +27,7 @@ type Config struct {
 
 func main() {
 	if err := run(); err != nil {
-		slog.Error("cars service failed", "error", err)
+		slog.Error("service failed", "error", err)
 		os.Exit(1)
 	}
 }
