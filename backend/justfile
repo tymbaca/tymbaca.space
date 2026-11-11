@@ -1,7 +1,10 @@
-set dotenv-filename := "infra.local.env"
+set dotenv-filename := ".env"
 set dotenv-load := true
 
 GOOSE := "go run github.com/pressly/goose/v3/cmd/goose@v3.29.0"
+
+env:
+    cp infra.local.env .env || true
 
 run:
     go run ./cmd/backend
