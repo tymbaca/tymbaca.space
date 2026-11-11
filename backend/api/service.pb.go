@@ -25,7 +25,6 @@ const (
 type IncrementViewReq struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Url           string                 `protobuf:"bytes,1,opt,name=url,proto3" json:"url,omitempty"`
-	ClientAddr    string                 `protobuf:"bytes,2,opt,name=client_addr,json=clientAddr,proto3" json:"client_addr,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -63,13 +62,6 @@ func (*IncrementViewReq) Descriptor() ([]byte, []int) {
 func (x *IncrementViewReq) GetUrl() string {
 	if x != nil {
 		return x.Url
-	}
-	return ""
-}
-
-func (x *IncrementViewReq) GetClientAddr() string {
-	if x != nil {
-		return x.ClientAddr
 	}
 	return ""
 }
@@ -114,11 +106,9 @@ var File_api_service_proto protoreflect.FileDescriptor
 
 const file_api_service_proto_rawDesc = "" +
 	"\n" +
-	"\x11api/service.proto\x12\abackend\x1a\x1cgoogle/api/annotations.proto\"E\n" +
+	"\x11api/service.proto\x12\abackend\x1a\x1cgoogle/api/annotations.proto\"$\n" +
 	"\x10IncrementViewReq\x12\x10\n" +
-	"\x03url\x18\x01 \x01(\tR\x03url\x12\x1f\n" +
-	"\vclient_addr\x18\x02 \x01(\tR\n" +
-	"clientAddr\"\x13\n" +
+	"\x03url\x18\x01 \x01(\tR\x03url\"\x13\n" +
 	"\x11IncrementViewResp2{\n" +
 	"\x0eBackendService\x12i\n" +
 	"\rIncrementView\x12\x19.backend.IncrementViewReq\x1a\x1a.backend.IncrementViewResp\"!\x82\xd3\xe4\x93\x02\x1b:\x01*\"\x16/api/v1/view/incrementB6Z4github.com/tymbaca/tymbaca.space/backend/api;backendb\x06proto3"

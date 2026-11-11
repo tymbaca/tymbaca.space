@@ -17,7 +17,6 @@ service BackendService {
 
 message IncrementViewReq {
   string url = 1;
-  string client_addr = 2;
 }
 
 message IncrementViewResp {}
