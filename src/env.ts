@@ -8,5 +8,9 @@ export const variables = defineEnvVars({
 	SHOW_DRAFTS: {
 		schema: (value) => value === 'true',
 		description: 'Set to "true" to include articles with "draft": true in md.json.'
+	},
+	BACKEND_URL: {
+		schema: (value) => value?.trim().replace(/\/+$/, '') || 'http://localhost:8080',
+		description: 'Base URL of the backend HTTP gateway used by the view counter.'
 	}
 });

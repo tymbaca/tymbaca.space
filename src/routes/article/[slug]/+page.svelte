@@ -1,7 +1,9 @@
 <script lang="ts">
+	import { browser } from '$app/env';
 	import ArticleBody from '#lib/components/ArticleBody.svelte';
 	import ArticleToc from '#lib/components/ArticleToc.svelte';
 	import ReadingProgress from '#lib/components/ReadingProgress.svelte';
+	import { trackArticleView } from '#lib/views';
 	import type { PageProps } from './$types';
 
 	let { data }: PageProps = $props();
@@ -10,6 +12,19 @@
 	const description = $derived(
 		article.excerpt || `${article.title} — a note on tymbaca.space.`
 	);
+
+	let trackedSlug: string | undefined;
+
+	// Count a view once per article, after hydration. The effect also handles
+	// client-side navigation between articles, where the component is reused.
+	$effect(() => {
+		const slug = article.slug;
+
+		if (!browser || slug === trackedSlug) return;
+
+		trackedSlug = slug;
+		trackArticleView(window.location.pathname);
+	});
 </script>
 
 <svelte:head>
