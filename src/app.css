@@ -370,7 +370,8 @@ textarea {
 	color: var(--code-text);
 	font-size: 0.8rem;
 	line-height: 1.72;
-	tab-size: 2;
+	/* Tabs are rendered as 4 spaces by default (2 is too narrow to read). */
+	tab-size: 4;
 	overflow-x: auto;
 }
 
@@ -381,6 +382,15 @@ textarea {
 	color: inherit;
 	font-size: inherit;
 	white-space: pre;
+}
+
+/*
+ * gofmt indents with tabs and formats for 8-column tab stops, so Go sources
+ * need wider tabs than every other language.
+ */
+.prose pre code.language-go,
+.prose pre code.language-golang {
+	tab-size: 8;
 }
 
 .prose pre::before {
