@@ -5,7 +5,7 @@ Leader election - процесс, когда несколько нод реша�
 
 ```go
 type Election interface {
-    IsLeader() bool
+	IsLeader() bool
 }
 ```
 
@@ -38,7 +38,7 @@ type Election interface {
 
 ```go
 if election.IsLeader() {
-    CancelOutdatedOrdersJob.Run()
+	CancelOutdatedOrdersJob.Run()
 }
 ```
 
